@@ -99,56 +99,140 @@ buffer needs to be placed at a fixed address (rather than by the linker). */
 	extern char cOutputBuffer[ configCOMMAND_INT_MAX_OUTPUT_SIZE ];
 #endif
 
+/* Set to pdTRUE if FreeRTOS_CLICreateStatic is used at which point RegisterCommand
+   and ProcessCommand uses the static allocation instead of doing dynamic allocations. */
+static BaseType_t xUseStaticAllocation = pdFALSE;
+
+/*-----------------------------------------------------------*/
+#if( configSUPPORT_STATIC_ALLOCATION == 1 )
+	static CLI_Command_Definition_t * pxCommandListStart;
+	static UBaseType_t uxCommandListLen;
+
+	FreeRTOS_CLICreateStatic( CLI_Command_Definition_t * pxCommandListStorage, const UBaseType_t uxCommandListLength )
+	{	
+    BaseType_t xReturn = pdFAIL;
+		if( xCommandListLength > 0)
+		{
+			pxCommandListStart = pxCommandListStorage;
+			xCommandListLen = xCommandListLength;
+
+			// Zero command list
+			memset(pxCommandListStart, 0x00, sizeof(CLI_Command_Definition_t*) * xCommandListLen);
+
+			// Add help command
+			pxCommandListStart = &xHelpCommand;
+
+			xUseStaticAllocation = pdTRUE;
+			xReturn = pdPASS;
+		}
+		return xReturn;
+	}
+
+#endif /* ( configSUPPORT_STATIC_ALLOCATION == 1 ) */
 
 /*-----------------------------------------------------------*/
 
 BaseType_t FreeRTOS_CLIRegisterCommand( const CLI_Command_Definition_t * const pxCommandToRegister )
 {
-static CLI_Definition_List_Item_t *pxLastCommandInList = &xRegisteredCommands;
+static CLI_Definition_List_Item_t * pxLastCommandInList = &xRegisteredCommands;
 CLI_Definition_List_Item_t *pxNewListItem;
 BaseType_t xReturn = pdFAIL;
 
 	/* Check the parameter is not NULL. */
 	configASSERT( pxCommandToRegister );
 
-	/* Create a new list item that will reference the command being registered. */
-	pxNewListItem = ( CLI_Definition_List_Item_t * ) pvPortMalloc( sizeof( CLI_Definition_List_Item_t ) );
-	configASSERT( pxNewListItem );
-
-	if( pxNewListItem != NULL )
+#if( configSUPPORT_STATIC_ALLOCATION == 1 )
+	if( xUseStaticAllocation == pdTRUE )
 	{
-		taskENTER_CRITICAL();
-		{
-			/* Reference the command being registered from the newly created
-			list item. */
-			pxNewListItem->pxCommandLineDefinition = pxCommandToRegister;
-
-			/* The new list item will get added to the end of the list, so
-			pxNext has nowhere to point. */
-			pxNewListItem->pxNext = NULL;
-
-			/* Add the newly created list item to the end of the already existing
-			list. */
-			pxLastCommandInList->pxNext = pxNewListItem;
-
-			/* Set the end of list marker to the new list item. */
-			pxLastCommandInList = pxNewListItem;
+		CLI_Definition_List_Item_t * pxNextPosition;
+		for( pxNextPosition = pxCommandListStart ; 
+			 pxNextPosition != NULL && pxNextPosition < (pxCommandListStart + uxCommandListLen) ;
+			 pxNextPosition++ ) { }
+		if( pxNextPosition < pxCommandListStart + uxCommandListLen ) {
+			memcpy(pxNextPosition, pxCommandToRegister, sizeof(CLI_Command_Definition_t));
+			xReturn = pdPASS;
 		}
-		taskEXIT_CRITICAL();
-
-		xReturn = pdPASS;
 	}
+	else
+	{
+#endif /* ( configSUPPORT_STATIC_ALLOCATION == 1 ) */
+		/* Create a new list item that will reference the command being registered. */
+		pxNewListItem = ( CLI_Definition_List_Item_t * ) pvPortMalloc( sizeof( CLI_Definition_List_Item_t ) );
+		configASSERT( pxNewListItem );
+
+		if( pxNewListItem != NULL )
+		{
+			taskENTER_CRITICAL();
+			{
+				/* Reference the command being registered from the newly created
+				list item. */
+				pxNewListItem->pxCommandLineDefinition = pxCommandToRegister;
+
+				/* The new list item will get added to the end of the list, so
+				pxNext has nowhere to point. */
+				pxNewListItem->pxNext = NULL;
+
+				/* Add the newly created list item to the end of the already existing
+				list. */
+				pxLastCommandInList->pxNext = pxNewListItem;
+
+				/* Set the end of list marker to the new list item. */
+				pxLastCommandInList = pxNewListItem;
+			}
+			taskEXIT_CRITICAL();
+
+			xReturn = pdPASS;
+		}
+#if( configSUPPORT_STATIC_ALLOCATION == 1 )
+	}
+#endif
 
 	return xReturn;
 }
 /*-----------------------------------------------------------*/
 
+static BaseType_t prvFreeRTOS_CLICommandEquals(const char* const pcCommandInput, const CLI_Definition_List_Item_t* pxCommand, BaseType_t* const pxValidArgs)
+{
+BaseType_t xReturn = pdFALSE;
+const char *pcRegisteredCommandString;
+size_t xCommandStringLength;
+
+	pxValidArgs = pdTRUE;
+	pcRegisteredCommandString = pxCommand->pxCommandLineDefinition->pcCommand;
+	xCommandStringLength = strlen( pcRegisteredCommandString );
+
+	/* To ensure the string lengths match exactly, so as not to pick up
+	a sub-string of a longer command, check the byte after the expected
+	end of the string is either the end of the string or a space before
+	a parameter. */
+	if( ( pcCommandInput[ xCommandStringLength ] == ' ' ) || ( pcCommandInput[ xCommandStringLength ] == 0x00 ) )
+	{
+		if( strncmp( pcCommandInput, pcRegisteredCommandString, xCommandStringLength ) == 0 )
+		{
+			/* The command has been found.  Check it has the expected
+			number of parameters.  If cExpectedNumberOfParameters is -1,
+			then there could be a variable number of parameters and no
+			check is made. */
+			if( pxCommand->pxCommandLineDefinition->cExpectedNumberOfParameters >= 0 )
+			{
+				if( prvGetNumberOfParameters( pcCommandInput ) != pxCommand->pxCommandLineDefinition->cExpectedNumberOfParameters )
+				{
+					pxValidArgs = pdFALSE;
+				}
+			}
+
+			xReturn = pdTRUE;
+		}
+	}
+	return xReturn
+}
+
+
+
 BaseType_t FreeRTOS_CLIProcessCommand( const char * const pcCommandInput, char * pcWriteBuffer, size_t xWriteBufferLen  )
 {
 static const CLI_Definition_List_Item_t *pxCommand = NULL;
 BaseType_t xReturn = pdTRUE;
-const char *pcRegisteredCommandString;
-size_t xCommandStringLength;
 
 	/* Note:  This function is not re-entrant.  It must not be called from more
 	thank one task. */
@@ -156,35 +240,34 @@ size_t xCommandStringLength;
 	if( pxCommand == NULL )
 	{
 		/* Search for the command string in the list of registered commands. */
-		for( pxCommand = &xRegisteredCommands; pxCommand != NULL; pxCommand = pxCommand->pxNext )
+#if( configSUPPORT_STATIC_ALLOCATION == 1 )
+		if( xUseStaticAllocation == pdTRUE )
 		{
-			pcRegisteredCommandString = pxCommand->pxCommandLineDefinition->pcCommand;
-			xCommandStringLength = strlen( pcRegisteredCommandString );
-
-			/* To ensure the string lengths match exactly, so as not to pick up
-			a sub-string of a longer command, check the byte after the expected
-			end of the string is either the end of the string or a space before
-			a parameter. */
-			if( ( pcCommandInput[ xCommandStringLength ] == ' ' ) || ( pcCommandInput[ xCommandStringLength ] == 0x00 ) )
+			for( pxCommand = pxCommandListStart; pxCommand != NULL && pxCommand < pxCommandListStart + uxCommandListLen; pxCommand++ )
 			{
-				if( strncmp( pcCommandInput, pcRegisteredCommandString, xCommandStringLength ) == 0 )
+				BaseType_t xValidArgs;
+				xResult = prvFreeRTOS_CLICommandEquals(pcCommandInput, pxCommand, &xValidArgs);
+				if( xValidArgs == pdFALSE )
 				{
-					/* The command has been found.  Check it has the expected
-					number of parameters.  If cExpectedNumberOfParameters is -1,
-					then there could be a variable number of parameters and no
-					check is made. */
-					if( pxCommand->pxCommandLineDefinition->cExpectedNumberOfParameters >= 0 )
-					{
-						if( prvGetNumberOfParameters( pcCommandInput ) != pxCommand->pxCommandLineDefinition->cExpectedNumberOfParameters )
-						{
-							xReturn = pdFALSE;
-						}
-					}
-
 					break;
 				}
 			}
 		}
+		else
+		{
+#endif /* ( configSUPPORT_STATIC_ALLOCATION == 1 ) */
+			for( pxCommand = &xRegisteredCommands; pxCommand != NULL; pxCommand = pxCommand->pxNext )
+			{
+				BaseType_t xValidArgs;
+				xResult = prvFreeRTOS_CLICommandEquals(pcCommandInput, pxCommand, &xValidArgs);
+				if( xValidArgs == pdFALSE )
+				{
+					break;
+				}
+			}
+#if( configSUPPORT_STATIC_ALLOCATION == 1 )
+		}
+#endif
 	}
 
 	if( ( pxCommand != NULL ) && ( xReturn == pdFALSE ) )
@@ -290,13 +373,39 @@ BaseType_t xReturn;
 	if( pxCommand == NULL )
 	{
 		/* Reset the pxCommand pointer back to the start of the list. */
-		pxCommand = &xRegisteredCommands;
+#if( configSUPPORT_STATIC_ALLOCATION == 1 )
+		if( xUseStaticAllocation == pdTRUE )
+		{
+			pxCommand = pxCommandListStart;
+		}
+		else
+		{
+#endif /* ( configSUPPORT_STATIC_ALLOCATION == 1 ) */
+			pxCommand = &xRegisteredCommands;
+#if( configSUPPORT_STATIC_ALLOCATION == 1 )
+		}
+#endif /* ( configSUPPORT_STATIC_ALLOCATION == 1 ) */
 	}
 
 	/* Return the next command help string, before moving the pointer on to
 	the next command in the list. */
 	strncpy( pcWriteBuffer, pxCommand->pxCommandLineDefinition->pcHelpString, xWriteBufferLen );
-	pxCommand = pxCommand->pxNext;
+#if( configSUPPORT_STATIC_ALLOCATION == 1 )
+	if( xUseStaticAllocation == pdTRUE )
+	{
+		pxCommand++;
+		if( pxCommand >= pxCommandListStart + uxCommandListLen )
+		{
+			pxCommand = NULL;
+		}
+	}
+	else
+	{
+#endif /* ( configSUPPORT_STATIC_ALLOCATION == 1 ) */
+		pxCommand = pxCommand->pxNext;
+#if( configSUPPORT_STATIC_ALLOCATION == 1 )
+	}
+#endif /* ( configSUPPORT_STATIC_ALLOCATION == 1 ) */
 
 	if( pxCommand == NULL )
 	{

@@ -48,6 +48,8 @@ typedef struct xCOMMAND_LINE_INPUT
 /* For backward compatibility. */
 #define xCommandLineInput CLI_Command_Definition_t
 
+FreeRTOS_CLICreateStatic( CLI_Command_Definition_t * pxCommandListStorage, const UBaseType_t uxCommandListLength );
+
 /*
  * Register the command passed in using the pxCommandToRegister parameter.
  * Registering a command adds the command to the list of commands that are
